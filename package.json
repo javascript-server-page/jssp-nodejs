@@ -1,0 +1,25 @@
+{
+  "name": "jssp-nodejs",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "start": "node bin/run.js",
+    "dev": "./node_modules/.bin/nodemon bin/run.js",
+    "prd": "pm2 start bin/run.js",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "pkg": "pkg . -t node14-win-x64 -o dist/jssp",
+    "release": "pkg . --compress GZip -t node14-win-x64 -o dist/jssp"
+  },
+  "bin": "./bin/run.js",
+  "dependencies": {
+    "debug": "^4.1.1",
+    "koa": "^2.7.0",
+    "koa-bodyparser": "^4.2.1",
+    "koa-logger": "^3.2.0",
+    "koa-onerror": "^4.1.0",
+    "koa-send": "^5.0.1"
+  },
+  "devDependencies": {
+    "nodemon": "^1.19.1"
+  }
+}
