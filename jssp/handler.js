@@ -2,6 +2,7 @@ const vm = require("vm");
 const send = require('koa-send')
 const fs = require('fs')
 const path = require('path')
+const ts = require('typescript')
 
 /**
  *
@@ -13,17 +14,19 @@ module.exports = function (opts) {
     return async function (ctx) {
 
         const fullPath = path.join(dir, ctx.path)
-        const {fileType, fileExt} = getFileInfo(fullPath)
+        const {fileType, fileExt, fileLastDate} = getFileInfo(fullPath)
         switch (fileType) {
             case "jssp":
-            case "jsjs":
-                renderJsCode(ctx, fullPath, fileType, fileExt);
+            case "js":
+            case "tssp":
+            case "ts":
+                await renderCode(ctx, fullPath, fileType, fileExt, fileLastDate);
                 break
             case "file":
                 await send(ctx, ctx.path, {index: false, root: dir})
                 break
             case "dir":
-
+                renderDir(ctx, fullPath, opts.isRenderDir);
                 break
             default:
                 break
@@ -31,33 +34,134 @@ module.exports = function (opts) {
     }
 }
 
-function makeSandBoxContextObject(ctx) {
-    let buf = [];
-    return {ctx, require, echo: function (str) {
-            buf.push(str)
-            // ctx.res.write(str);
-        }, print: function (obj) {
-            buf.push(JSON.stringify(obj))
-            // ctx.res.write(JSON.stringify(obj));
-        }, end: function () {
-            ctx.body = buf.join('')
-        }};
+
+function renderDir(ctx, fullPath, isRenderDir) {
+    const indexFiles = ['index.jssp.html', 'index.tssp.html', 'index.js.html', 'index.ts.html', 'index.html']
+    for (let indexFile of indexFiles) {
+        let {fileType} = getFileInfo(path.join(fullPath, indexFile))
+        if (fileType !== 'notfound' && fileType !== 'dir') {
+            let url = path.join(ctx.path, indexFile);
+            ctx.redirect(url.replace(/\\/g, "/"))
+            return
+        }
+    }
+    isRenderDir = true
+    if (!isRenderDir) { // 403
+        ctx.status = 403
+        return
+    }
+
+    let html = []
+    html.push("<pre>\n")
+    let hasSuffix = ctx.path[ctx.path.length-1] === '/'
+
+    for (let name of fs.readdirSync(fullPath)) {
+        let {fileType} = getFileInfo(path.join(fullPath, name));
+        if (fileType === 'notfound') {
+            continue
+        }
+        if (hasSuffix) {
+            html.push("<a href='" + name)
+        } else {
+            html.push("<a href='" + path.basename(ctx.path) + "/" + name)
+        }
+        if (fileType === 'dir') {
+            html.push("/'>" + name + "</a>\n")
+        } else {
+            html.push("'>" + name + "</a>\n")
+        }
+    }
+    html.push("</pre>\n")
+    ctx.body = html.join('')
 }
 
-function renderJsCode(ctx, fullPath, fileType, fileExt) {
+function makeSandBoxContextObject(ctx, fullPath) {
+    let __buf = [];
+    let __promise;
+    let __resolve;
+    return {
+        context: ctx, require, include: function (filename) {
+            let dir = path.dirname(fullPath);
+            let fileContent = fs.readFileSync(path.join(dir, filename)).toString();
+            __buf.push(fileContent);
+        }, global, echo: function () {
+            for (var i in arguments) {
+                var str = String(arguments[i])
+                if (str.length === 0) {
+                    continue
+                }
+                __buf.push(str);
+            }
+        }, print: function () {
+            if (arguments.length === 0) return
+            if (arguments.length === 1) {
+                __buf.push(JSON.stringify(arguments[0]))
+            } else {
+                __buf.push(JSON.stringify(arguments))
+            }
+        }, render: function () {
+            ctx.body = __buf.join('')
+        }, promise: function () {
+            return __promise;
+        }, end: async function () {
+            if (__resolve) {
+                __resolve()
+            }
+        }, wait: function () {
+            __promise = new Promise((resolve, reject) => {
+                __resolve = resolve;
+            });
+        }
+    };
+}
+
+const LRU = require('lru-cache');
+
+const cache = new LRU({
+    max: 500,
+    // maxAge: 1000 * 60 * 60
+});
+
+
+async function renderCode(ctx, fullPath, fileType, fileExt, fileLastDate) {
     ctx.response.type = fileExt;
-    let buffer = fs.readFileSync(fullPath);
-    let jsCode;
-    if (fileType === 'jssp') {
-        jsCode = jsspTemplateToJsCode(buffer.toString());
-    } else {
-        jsCode = buffer.toString();
+    let fileCache = cache.get(fullPath);
+    if (!fileCache || fileCache.fileLastDate !== fileLastDate) {
+        let fileContent = fs.readFileSync(fullPath).toString();
+        let jsCode;
+
+        const start = new Date()
+
+        if (fileType === 'jssp') {
+            jsCode = templateToCode(fileContent);
+        }
+        if (fileType === 'tssp') {
+            let tsCode = templateToCode(fileContent);
+            const {outputText} = ts.transpileModule(tsCode, {});
+            jsCode = outputText;
+        }
+        if (fileType === 'ts') {
+            const {outputText} = ts.transpileModule(fileContent, {});
+            jsCode = outputText;
+        }
+        if (fileType === 'js') {
+            jsCode = fileContent;
+        }
+        const ms = new Date() - start
+        console.log(`------------${ctx.url} - ${ms}ms`)
+
+        fileCache = {fileLastDate, script: new vm.Script(jsCode)}
+        cache.set(fullPath, fileCache)
     }
-    const sandbox = makeSandBoxContextObject(ctx);
-    const script = new vm.Script(jsCode);
+
+    const sandbox = makeSandBoxContextObject(ctx, fullPath);
     const context = new vm.createContext(sandbox);
-    script.runInContext(context);
-    sandbox.end();
+    fileCache.script.runInContext(context);
+    let promise = sandbox.promise();
+    if (promise) {
+        await promise;
+    }
+    sandbox.render();
 }
 
 function getFileInfo(filepath) {
@@ -70,10 +174,16 @@ function getFileInfo(filepath) {
             let extname = path.extname(filepath)
             let basename = path.basename(filepath)
             if (basename.endsWith(".jssp" + extname)) {
-                return {fileType: "jssp", fileExt: extname}
+                return {fileType: "jssp", fileExt: extname, fileLastDate: stat.mtime}
             }
-            if (basename.endsWith(".jsjs" + extname)) {
-                return {fileType: "jsjs", fileExt: extname}
+            if (basename.endsWith(".js" + extname)) {
+                return {fileType: "js", fileExt: extname, fileLastDate: stat.mtime}
+            }
+            if (basename.endsWith(".tssp" + extname)) {
+                return {fileType: "tssp", fileExt: extname, fileLastDate: stat.mtime}
+            }
+            if (basename.endsWith(".ts" + extname)) {
+                return {fileType: "ts", fileExt: extname, fileLastDate: stat.mtime}
             }
             return {fileType: "file", fileExt: extname}
         }
@@ -89,7 +199,7 @@ function getFileInfo(filepath) {
  * @param data {string}
  * @returns {string}
  */
-function jsspTemplateToJsCode(data) {
+function templateToCode(data) {
     const buf = []
     buf.push(`echo("`)
     let isJsjs = false

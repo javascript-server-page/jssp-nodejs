@@ -1,8 +1,9 @@
 const Koa = require('koa')
-const app = new Koa()
 const onerror = require('koa-onerror')
 const bodyparser = require('koa-bodyparser')
 const logger = require('koa-logger')
+
+const app = new Koa()
 
 // error handler
 onerror(app)
@@ -37,3 +38,20 @@ app.on('error', (err, ctx) => {
 app.port = 3000
 
 module.exports = app
+
+const path = require('path');
+const ts = require('typescript');
+const fs = require('fs');
+
+
+require.extensions['.ts'] = function(module, filename) {
+  const fileFullPath = path.resolve(__dirname, filename);
+  const content = fs.readFileSync(fileFullPath, 'utf-8');
+
+  const { outputText } = ts.transpileModule(content, {});
+  //{
+  //     compilerOptions: require('./tsconfig.json')
+  //   }
+  module._compile(outputText, filename);
+}
+// require('../jssp/111.ts');
